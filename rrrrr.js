@@ -1,41 +1,62 @@
+'use strict';
+require('dotenv').config();
+const express = require('express');
+const myDB = require('./connection');
+const fccTesting = require('./freeCodeCamp/fcctesting.js');
+const session = require('express-session');
 const passport = require('passport');
-const LocalStrategy = require('passport-local');
-const bcrypt = require('bcrypt');
-const { ObjectID } = require('mongodb');
-const GitHubStrategy = require('passport-github').Strategy;
+const routes = require('./routes.js');
+const auth = require('./auth.js');
 
-module.exports = function (app, myDataBase) {
-  passport.serializeUser((user, done) => {
-      done(null, user._id);
-  });
+const app = express();
 
-  passport.deserializeUser((id, done) => {
-      myDataBase.findOne({ _id: new ObjectID(id) }, (err, doc) => {
-          if (err) return console.error(err);
-          done(null, doc);
-      });
-  });
+const http = require('http').createServer(app);
+const io = require('socket.io')(http);
 
-  passport.use(new LocalStrategy((username, password, done) => {
-    myDataBase.findOne({ username: username }, (err, user) => {
-      console.log(`User ${username} attempted to log in.`);
-      if (err) { return done(err); }
-      if (!user) { return done(null, false); }
-      if (!bcrypt.compareSync(password, user.password)) { 
-          return done(null, false);
-      }
-      return done(null, user);
+app.set('view engine', 'pug');
+app.set('views', './views/pug');
+
+app.use(session({
+  secret: process.env.SESSION_SECRET,
+  resave: true,
+  saveUninitialized: true,
+  cookie: { secure: false }
+}));
+
+app.use(passport.initialize());
+app.use(passport.session());
+
+fccTesting(app); // For fCC testing purposes
+app.use('/public', express.static(process.cwd() + '/public'));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+myDB(async client => {
+  const myDataBase = await client.db('database').collection('users');
+
+  routes(app, myDataBase);
+  auth(app, myDataBase);
+
+  let currentUsers = 0;
+  io.on('connection', (socket) => {
+    ++currentUsers;
+    io.emit('user count', currentUsers);
+    console.log('A user has connected');
+
+    socket.on('disconnect', () => {
+      console.log('A user has disconnected');
+      --currentUsers;
+      io.emit('user count', currentUsers);
     });
-  }));
-
-  passport.use(new GitHubStrategy({
-      clientID: process.env.GITHUB_CLIENT_ID,
-      clientSecret: process.env.GITHUB_CLIENT_SECRET,
-      callbackURL: 'https://boilerplate-advancednode.sky020.repl.co/auth/github/callback'
-    },
-    function (accessToken, refreshToken, profile, cb) {
-      console.log(profile);
-      //Database logic here with callback containing our user object
-    }
-  ));
-}
+  });
+  
+}).catch(e => {
+  app.route('/').get((req, res) => {
+    res.render('index', { title: e, message: 'Unable to connect to database' });
+  });
+});
+  
+const PORT = process.env.PORT || 3000;
+http.listen(PORT, () => {
+  console.log(`Listening on port ${PORT}`);
+});
